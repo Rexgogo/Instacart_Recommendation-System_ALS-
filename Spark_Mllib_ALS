@@ -1,0 +1,207 @@
+setwdsetwd("D:/user/OneDrive - qw5p/my_BDSE/推薦系統專題/SparkR_backup/Instacart_final")
+library("dplyr")
+library("sparklyr")
+library("tidyr")
+library("base")
+library("readr")
+library("tibble")
+library("sampling")
+library("stargazer")
+
+## On YARN
+Sys.setenv(SPARK_HOME = '/usr/local/spark')   # for Standalone and YARN mode
+Sys.setenv(HADOOP_CONF_DIR = '/usr/local/hadoop/etc/hadoop')
+Sys.setenv(YARN_CONF_DIR = '/usr/local/hadoop/etc/hadoop')
+
+config <- spark_config()
+config$spark.executor.instances <- 10
+config$spark.executor.cores <- 2
+config$spark.executor.memory <- "6G"
+config$spark.rpc.message.maxSize = 1024
+
+sc <- spark_connect(master="yarn", config=config, version = '3.2.1')
+gc()
+# resolve gc overhead limit exceeded r
+options(java.parameters = "-Xmx1024m")
+
+# Dataset
+#dfALS <- read_csv("dfALS.csv")
+#save(dfALS, file = "dfALS.RData")
+# sampling-----
+load("dfALS1.RData")
+n <- nrow(dfALS)
+set.seed(0126)
+smalldfALS <- sample(seq_len(n), size = round(0.04 * n))
+smalldfALS <- dfALS[smalldfALS,] #note type
+save(smalldfALS, file = "smalldfALS.RData")
+write.csv(smalldfALS, file='smalldfALS.csv')
+str(smalldfALS)
+
+# SAVE AS .parquet
+parquet = tempfile(fileext = ".parquet")
+spark_write_parquet(smalldfALS, sink = parquet)
+
+
+smalldfALS <- sdf_collect(smalldfALS,impl = c("row-wise", "row-wise-iter", "column-wise"))
+
+write_parquet(smalldfALS, data)
+#dim(smalldfALS)
+#stargazer(smalldfALS, header = TRUE)
+
+# START
+sink("sink_ALS_final2.txt")
+load("smalldfALS.RData")
+#max(dfALS$ratio)
+#dim(dfALS)
+gc()
+
+
+
+#testALS <- sample(seq_len(n), size = round(0.1 * n))
+#testALS <- dfALS[testALS,]
+#dim(testALS)
+#testALS <- dfALS[ - smalldfALS,]
+
+
+## save data to Spark-----
+# using tbl_spark: tibble::tibble                                     
+# arg:overwrite = TRUE
+smalldfALS <- read_csv('dfALS10000.csv')
+scTest <- sdf_copy_to(sc, tibble::tibble(smalldfALS))
+gc()
+
+
+## fit-----
+#system.time({})
+system.time({model <- ml_als(scTest, formula = NULL, rating_col = "ratio", 
+                user_col = "user_id",  item_col = "product_id", 
+                rank = 30, reg_param = 0.1, max_iter = 10, 
+                checkpoint_interval = 10)})
+#class(model)
+gc()
+
+## 存取模型-----
+#path <- "path/model"
+#spark_write_ml(model, path, overwrite = FALSE)   # the directory where the model is saved.
+#savedModelV1 <- read.ml(path)
+#summary(savedModel) # 比較所有模型
+
+#statModel <- summary(model) #自動提取潛在因子
+#statModel
+# extract latent factors
+#model_tidy <- tidy(model) %>% collect
+#userFactors <- model_tidy$user_factors 
+#itemFactors <- model_tidy$item_factors
+
+
+# prediction of ratting, system.time({})-----
+predictTy <- sdf_collect(ml_predict(model, scTest))
+class(predictTy)
+predictTy
+#write.csv(predictTy, file='prediciton.csv')
+gc()
+
+## Recommend-----
+#recommendTyUser <- ml_recommend(model, type = "user", 10)
+recommendTyUser <- sdf_collect(ml_recommend(model, type = "user", 5))
+recommendTyUser
+write_csv(recommendTyUser, file='recommendUser.csv')
+gc()
+
+#recommendTyItem <- ml_recommend(model, type = "item", 10)
+recommendTyItem <- sdf_collect(ml_recommend(model, type = "item", 10))
+recommendTyItem
+write_csv(recommendTyItem, file='recommendItem.csv')
+gc()
+
+# eval
+als.RMSE <- sqrt(mean((predictTy$ratio - predictTy$prediction)^2))
+als.RMSE
+gc()
+
+
+# make predictions??
+# predicted <- predict(model, predict)
+# showDF(predicted)
+
+# EVAL- ml_evaluate()-----
+#alsEval <- sdf_copy_to(sc, smalldfALS)
+#ml_als(alsEval, formula = NULL, rating_col = "ratio", user_col = "user_id",  item_col = "product_id", rank = 100) %>% ml_evaluate(alsEval)
+
+sessionInfo()
+proc.time()
+gc()
+spark_disconnect(sc)
+
+sink()
+
+## test----
+
+library("readr")
+library("ggplot2")
+## user10000 的使用習慣
+main10000 <- read_csv("main.csv")
+main10000 <- subset(main10000, main10000$user_id<=9000)
+main10000 <- subset(main10000, select=c(product_id, department))
+countmain10000 <- count(main10000, department) %>% as.data.frame()
+
+#ggplot(countmain10000 , aes(x="", y=n, fill=department)) +
+  #geom_bar(stat="identity", color="white") +
+  #coord_polar("y", start=0)
+sum(countmain10000$n)
+nrow(countmain10000)
+percent <- transform(table(countmain10000$department), 
+          percentage=countmain10000$n/sum(countmain10000$n)*100)%>%
+  subset(select=c(-2))
+sum(percent$percentage)
+
+
+#main10000 %>% 
+#ggplot(aes(x=department, y=n)) + 
+#geom_col()+
+#scale_x_discrete(limits = main10000$department)
+
+#main10000 %>% 
+  #ggplot(aes(x=department, y=count)))+
+  #geom_histogram(stat="count",fill="#00A600")+
+  #coord_cartesian(xlim=c(0,20))+
+  #ylab("count") + xlab("department") + 
+  #ggtitle("main10000")
+  
+## list of recommendation, plot by department----- 
+recommendlist <- read_csv("recommendItem.csv")
+View(recommendItem)
+recommendlist <- subset(recommendlist, select=c(-1, -2, -4))
+main <- read_csv("main.csv")
+
+main <- subset(main, select = c(2, 5, 9))
+main <- subset(main, main$product_id<=49681) %>% unique()
+recommendlist <- merge(recommendlist, main, by = "product_id", all.x = T) #%>% as.data.frame()
+
+recommendlist <- count(recommendlist, department) %>% as.data.frame()
+nrow(recommendlist)
+percent <- transform(table(recommendlist$department), 
+                     percentage=recommendlist$n/sum(recommendlist$n)*100) %>%
+  subset(select=c(-2))
+sum(percent$percentage)
+
+recommendlist %>%
+  ggplot(aes(x=department))+
+  geom_histogram(stat="count",fill="#00A600")+
+  ylab("count") + xlab("department") + 
+  ggtitle("recommendlist")
+
+## user-item test-----
+findproduct <- read_csv("main.csv")
+findproduct <- subset(findproduct, select=c('product_id', 'product_name', 'department'))
+onlyproduct <- unique(findproduct)
+#write_csv(onlyproduct, file='productList.csv')
+productList <- read_csv('productList.csv')
+productList[which(productList$product_id==3721
+),]
+
+
+main <- read_csv("dfALS10000.csv")
+mainperson <- subset(main, main$user_id==569)
+recommendItem <- read_csv("recommendItem.csv")
+recommendperson <- subset(recommendItem, recommendItem$user_id==1)
