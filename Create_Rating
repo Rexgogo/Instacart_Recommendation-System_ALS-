@@ -1,0 +1,55 @@
+setwdsetwd("D:/user/OneDrive - qw5p/my_BDSE/推薦系統專題/SparkR_backup/Instacart_final")
+library("readr")
+library("dplyr")
+library("sparklyr")
+library("reshape")
+library("scales")
+library("ggplot2")
+
+Sys.setenv(SPARK_HOME = '/usr/local/spark')
+Sys.setenv(HADOOP_CONF_DIR = '/usr/local/hadoop/etc/hadoop')
+Sys.setenv(YARN_CONF_DIR = '/usr/local/hadoop/etc/hadoop')
+config <- spark_config()
+config$spark.executor.instances <- 10
+config$spark.executor.cores <- 2
+config$spark.executor.memory <- "6G"
+sc <- spark_connect(master="yarn", config=config, version = '3.2.1')
+
+## Dataset
+load('main.RData')
+str(df)
+df <- as.data.frame(df)
+## NewFeature1-單品在每人所有訂單中的比例------
+
+# str(likeLevel)
+likeLevel <- subset(df, select = c(user_id, product_id))
+likeLevel <- count(likeLevel, product_id, user_id)
+likeLevel <- rename(likeLevel, c(n = "times"))
+
+# aggregate()
+totalTimes <- aggregate(likeLevel$times, by=list(user_id=likeLevel$user_id), FUN=sum) %>% rename(c(x = 'total'))
+# str(totalTimes)
+
+# merge()
+# 以百分比顯示label_percent(accuracy = 1)(times / total)
+likeLevel <- merge(likeLevel, totalTimes, by.likeLevel='user_id') %>% mutate(ratio = times / total * 100) 
+likeLevel$ratio <- as.integer(likeLevel$ratio)
+str(likeLevel)
+        
+# 刪除times, total
+likeLevel <- subset(likeLevel, select = c(-3, -4))
+write.csv(likeLevel, file ='dfALS1.csv')
+dfALS <- read_csv('dfALS1.csv')
+save(dfALS, file = "dfALS1.RData")
+
+
+## user10000origine
+dfALS2 <- read_csv('dfALS1.csv')
+dfALS100 <- subset(dfALS2, dfALS2$user_id<9001)
+#dfALStest <- dfALS2[which(dfALS2$user_id<=9000),]
+write_csv(dfALS100, 'dfALS10000.csv')
+
+## recommendUser-0----
+y <- read_csv('recommendUser.csv')
+y <- subset(y, select=c(product_id, user_id, rating)) %>% with(y, rating>0)
+write.csv(y, file='recommendUser-0.csv')
